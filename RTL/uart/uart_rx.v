@@ -55,6 +55,7 @@ always @(posedge clk) begin
 			if(clk_cnt == ((CLKS_PER_BIT / 2) - 1)) begin //heres the waiting half a bit mentioned at the start
 				if(rx_s2 == 0) begin
 					state <= DATA;
+					clk_cnt <= 16'b0; // FIX: Reset the counter for the DATA state
 					end
 					else
 					state <= IDLE;

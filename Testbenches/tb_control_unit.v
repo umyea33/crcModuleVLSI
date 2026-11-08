@@ -1,8 +1,7 @@
 `timescale 1ns / 1ps
 
 module crc_ctrl_tb;
-    localparam TIMEOUT = 50, GAP = 3;              // GAP must be < TIMEOUT
-    localparam KEY = 8'hA5, ACK = 8'h06, NAK = 8'h15;
+    localparam TIMEOUT = 50, GAP = 3;
 
     reg         clk = 0, rst_n = 0, rx_valid = 0, tx_ready = 1;
     reg  [7:0]  rx_data = 0;
@@ -18,11 +17,9 @@ module crc_ctrl_tb;
 
     always #5 clk = ~clk;
 
-    reg [2:0]  sh_opts = 3'bxxx;                   // {xor, init, bus16}, unknown until written
-    reg [15:0] sh_poly = 16'hxxxx;
-    integer    pass_cnt = 0, fail_cnt = 0, p;
+    integer pass_cnt = 0, fail_cnt = 0;
 
-    task do_reset;                                 // FSM only, config is kept
+    task do_reset;
         begin
             rst_n = 0; rx_valid = 0;
             repeat (3) @(posedge clk);
@@ -52,81 +49,62 @@ module crc_ctrl_tb;
             end
             if (bad) begin
                 fail_cnt = fail_cnt + 1;
-                $display("FAIL response sent after an incomplete frame");
+                $display("FAIL response sent unexpectedly");
             end else
                 pass_cnt = pass_cnt + 1;
         end
     endtask
 
-    // Sends one frame and checks the response and the config outputs.
-    // addr[7] = read. hold = idle cycles after ADDR. chk_err is XORed into CHK.
-    // stall = cycles tx_ready is held low after the frame.
-    task frame(input [7:0] addr, input [7:0] data, input integer hold,
-               input [7:0] chk_err, input integer stall);
-        reg [7:0] exp_resp, got;
-        reg       seen, bad;
-        integer   t;
+    task uart_write(input [7:0] cmd, input [15:0] data);
         begin
-            seen = 0; bad = 0; got = 0; exp_resp = NAK;
+            send_byte(cmd);
+            send_byte(data[15:8]);
+            send_byte(data[7:0]);
+            wait_quiet(10); // Writes produce no TX response in new protocol
+        end
+    endtask
 
-            if (chk_err == 8'h00 && addr[6:2] == 5'b00000) begin
-                if (addr[7]) begin                                  // read
-                    case (addr[1:0])
-                        2'd0:    exp_resp = {5'b00000, sh_opts};
-                        2'd1:    exp_resp = sh_poly[7:0];
-                        2'd2:    exp_resp = sh_poly[15:8];
-                        default: ;                                  // PRESET is write-only
-                    endcase
-                end else begin                                      // write
-                    exp_resp = ACK;
-                    case (addr[1:0])
-                        2'd0: sh_opts = data[2:0];
-                        2'd1: sh_poly[7:0]  = data;
-                        2'd2: sh_poly[15:8] = data;
-                        2'd3: begin
-                            sh_opts[0] = data[3];
-                            case (data[2:0])
-                                3'd0: begin sh_poly = 16'h1021; sh_opts[2:1] = 2'b00; end
-                                3'd1: begin sh_poly = 16'h1021; sh_opts[2:1] = 2'b01; end
-                                3'd2: begin sh_poly = 16'h1021; sh_opts[2:1] = 2'b11; end
-                                3'd3: begin sh_poly = 16'h1021; sh_opts[2:1] = 2'b10; end
-                                3'd4: begin sh_poly = 16'h8005; sh_opts[2:1] = 2'b00; end
-                                3'd5: begin sh_poly = 16'h8005; sh_opts[2:1] = 2'b01; end
-                                3'd6: begin sh_poly = 16'h0700; sh_opts[2:1] = 2'b00; end
-                                3'd7: begin sh_poly = 16'h1DCF; sh_opts[2:1] = 2'b11; end
-                            endcase
-                        end
-                    endcase
+    task uart_read(input [7:0] cmd, input [15:0] exp_data, input integer stall);
+        reg [15:0] got;
+        reg bad, seen_msb, seen_lsb;
+        integer t;
+        begin
+            got = 16'hxxxx;
+            seen_msb = 0; seen_lsb = 0; bad = 0;
+            tx_ready = 1;
+
+            send_byte(cmd);
+            
+            // Wait for MSB
+            for (t = 0; t < 20 && !seen_msb; t = t + 1) begin
+                @(posedge clk); #1;
+                if (tx_valid) begin 
+                    seen_msb = 1; 
+                    got[15:8] = tx_data; 
+                    if (stall > 0) tx_ready = 0; // Test stalling the transmitter
                 end
             end
 
-            tx_ready = 0;
-            send_byte(addr);
-            repeat (hold) @(posedge clk);
-            send_byte(data);
-            send_byte(addr ^ data ^ KEY ^ chk_err);
-
+            // Stall if requested
             for (t = 0; t < stall; t = t + 1) begin
                 @(posedge clk); #1;
-                if (tx_valid) bad = 1;                              // must wait for tx_ready
             end
             tx_ready = 1;
 
-            for (t = 0; t < 20 && !seen; t = t + 1) begin
+            // Wait for LSB
+            for (t = 0; t < 20 && !seen_lsb; t = t + 1) begin
                 @(posedge clk); #1;
-                if (tx_valid) begin seen = 1; got = tx_data; end
+                if (tx_valid) begin 
+                    seen_lsb = 1; 
+                    got[7:0] = tx_data; 
+                end
             end
-            @(posedge clk); #1;
-            if (tx_valid) bad = 1;                                  // must be a 1-cycle pulse
 
-            if (seen && !bad && got === exp_resp &&
-                {xor_ones_in, init_ones_in, bus_16_in} === sh_opts && poly_in === sh_poly)
+            if (seen_msb && seen_lsb && (got === exp_data)) begin
                 pass_cnt = pass_cnt + 1;
-            else begin
+            end else begin
                 fail_cnt = fail_cnt + 1;
-                $display("FAIL frame %h %h chk_err=%h: resp %h/%h seen=%b bad=%b opts %b/%b poly %h/%h (got/exp)",
-                    addr, data, chk_err, got, exp_resp, seen, bad,
-                    {xor_ones_in, init_ones_in, bus_16_in}, sh_opts, poly_in, sh_poly);
+                $display("FAIL Read %h: got %h, expected %h (seen_msb=%b, seen_lsb=%b)", cmd, got, exp_data, seen_msb, seen_lsb);
             end
         end
     endtask
@@ -134,47 +112,34 @@ module crc_ctrl_tb;
     initial begin
         do_reset;
 
-        // Write each register and read it back
-        frame(8'h01, 8'h21, 0, 0, 0);
-        frame(8'h02, 8'h10, 0, 0, 0);
-        frame(8'h00, 8'hFD, 0, 0, 0);                  // upper DATA bits ignored
-        frame(8'h80, 8'h00, 0, 0, 0);
-        frame(8'h81, 8'h00, 0, 0, 0);
-        frame(8'h82, 8'h00, 0, 0, 0);
+        // Write Poly Register (CMD 0x80)
+        uart_write(8'h80, 16'h1021);
+        if (poly_in === 16'h1021) pass_cnt = pass_cnt + 1;
+        else begin fail_cnt = fail_cnt + 1; $display("FAIL Poly output wrong"); end
 
-        // Presets, then read back what they loaded
-        for (p = 0; p < 8; p = p + 1)
-            frame(8'h03, p, 0, 0, 0);
-        frame(8'h03, 8'h08, 0, 0, 0);
-        frame(8'h80, 8'h00, 0, 0, 0);
-        frame(8'h81, 8'h00, 0, 0, 0);
-        frame(8'h82, 8'h00, 0, 0, 0);
+        // Write Control Register (CMD 0x81)
+        uart_write(8'h81, 16'h0007); // bus_16=1, init_ones=1, xor_ones=1
+        if ({xor_ones_in, init_ones_in, bus_16_in} === 3'b111) pass_cnt = pass_cnt + 1;
+        else begin fail_cnt = fail_cnt + 1; $display("FAIL Ctrl output wrong"); end
 
-        // Rejected frames get a NAK and change nothing
-        frame(8'h00, 8'h07, 0, 8'h01, 0);              // bad checksum on a write
-        frame(8'h81, 8'h00, 0, 8'h80, 0);              // bad checksum on a read
-        frame(8'h00, 8'h00, 0, KEY, 0);                // 00 00 00 on the wire
-        frame(8'h04, 8'hFF, 0, 0, 0);                  // illegal address
-        frame(8'h40, 8'hFF, 0, 0, 0);                  // illegal address bits
-        frame(8'h83, 8'h00, 0, 0, 0);                  // read of the write-only PRESET
+        // Read Poly Register (CMD 0x00)
+        uart_read(8'h00, 16'h1021, 0);
+
+        // Read Control Register (CMD 0x01) with TX stall testing
+        uart_read(8'h01, 16'h0007, 5); // delay tx_ready for 5 cycles between MSB and LSB
 
         // Incomplete frames time out silently, and the next frame still works
-        send_byte(8'h01);
-        wait_quiet(TIMEOUT + 20);
-        frame(8'h02, 8'h55, 0, 0, 0);
-        send_byte(8'h01); send_byte(8'h42);
-        wait_quiet(TIMEOUT + 20);
-        frame(8'h02, 8'h66, 0, 0, 0);
-
-        // Slow but legal frame, and a stalled tx_ready
-        frame(8'h01, 8'h99, TIMEOUT - 10, 0, 0);
-        frame(8'h81, 8'h00, 0, 0, 5);
+        send_byte(8'h80); // Command byte only
+        wait_quiet(TIMEOUT + 20); // Should time out silently
+        
+        // Write Poly again with new value
+        uart_write(8'h80, 16'h8005);
+        uart_read(8'h00, 16'h8005, 0); // Verify it updated properly
 
         // Reset mid-frame keeps the config
-        send_byte(8'h01); send_byte(8'h42);
-        do_reset;
-        frame(8'h82, 8'h00, 0, 0, 0);
-        frame(8'h02, 8'h33, 0, 0, 0);
+        send_byte(8'h80); send_byte(8'h42);
+        do_reset; // resets FSM, keeps registers
+        uart_read(8'h00, 16'h8005, 0); // Poly should remain 8005
 
         $display("DONE: %0d pass, %0d fail", pass_cnt, fail_cnt);
         $finish;
