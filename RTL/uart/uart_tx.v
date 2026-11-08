@@ -1,122 +1,111 @@
-module uart_tx(
-  input wire [7:0] dataBus,
-  input wire byteReady,
-  input wire loadXmtDatareg,
-  input wire tByte,
-  input wire clk,
-  input wire rst,
-  output reg serialOut
+module uart_tx #(
+    parameter CLKS_PER_BIT = 434
+)(
+    input wire clk,
+    input wire rst_n,
+
+    input wire [7:0] tx_data,
+    input wire tx_valid,
+    output reg tx_ready,
+
+    output reg uart_tx
 );
 
-reg [7:0] dataReg;
-reg [9:0] shiftReg;
+    // FSM states
+    localparam IDLE  = 2'd0;
+    localparam START = 2'd1;
+    localparam DATA  = 2'd2;
+    localparam STOP  = 2'd3;
 
-reg [3:0] statusReg;
+    reg [1:0] state;
+    reg [15:0] clk_cnt;
+    reg [2:0] bit_idx;
+    reg [7:0] shift_reg;
 
-// Define all my states
-parameter [2:0] idle = 3'b000, loadData = 3'b001, wait1 = 3'b010,
-	loadShift = 3'b011, wait2 = 3'b100, start = 3'b101,
-	sending = 3'b110, clear = 3'b111;
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            state     <= IDLE;
+            uart_tx   <= 1'b1;   // UART is high while idle
+            tx_ready  <= 1'b1;
+            clk_cnt   <= 16'd0;
+            bit_idx   <= 3'd0;
+            shift_reg <= 8'd0;
+        end
+        else begin
+            case (state)
 
+                // Wait for a byte to be sent
+                IDLE: begin
+                    uart_tx  <= 1'b1;
+                    tx_ready <= 1'b1;
+                    clk_cnt  <= 16'd0;
+                    bit_idx  <= 3'd0;
 
-reg [2:0] current_state;
-reg [2:0] next_state;
+                    // Accept new data when it is valid and TX is available
+                    if (tx_valid && tx_ready) begin
+                        shift_reg <= tx_data;
+                        tx_ready  <= 1'b0;
+                        state     <= START;
+                    end
+                end
 
-// Set the state to change on the clock cycle
-always @(posedge clk, posedge rst) begin
+                // Send the start bit for one bit period
+                START: begin
+                    uart_tx <= 1'b0;
 
-  if(rst)
-    current_state <= idle;
-  else
-    current_state <= next_state;
+                    if (clk_cnt == CLKS_PER_BIT - 1) begin
+                        clk_cnt <= 16'd0;
+                        state   <= DATA;
+                    end
+                    else begin
+                        clk_cnt <= clk_cnt + 1'b1;
+                    end
+                end
 
-end
+                // Send all 8 data bits, least-significant bit first
+                DATA: begin
+                    uart_tx <= shift_reg[0];
 
-// Set next state based on input and current state
-always @(current_state, byteReady, loadXmtDatareg, tByte, clk) begin
+                    if (clk_cnt == CLKS_PER_BIT - 1) begin
+                        clk_cnt   <= 16'd0;
+                        shift_reg <= shift_reg >> 1;
 
-  case (current_state)
-    idle: begin
-      if(loadXmtDatareg)
-        next_state = loadData;
-      else
-        next_state = idle;
-    end
-    loadData: begin
-      if(byteReady)
-        next_state = loadShift;
-      else
-        next_state = wait1;
-    end
-    wait1: begin
-      if(byteReady)
-        next_state = loadShift;
-      else
-        next_state = wait1;
-    end
-    loadShift: begin
-      if(tByte)
-        next_state = start;
-      else
-        next_state = wait2;
-    end
-    wait2: begin
-      if(tByte)
-        next_state = start;
-      else
-        next_state = wait2;
-    end
-    start: begin
-      next_state = sending;
-    end
-    sending: begin
-      if(statusReg == 4'b1001)
-        next_state = clear;
-      else
-        next_state = sending;
-    end
-    clear: begin
-      next_state = idle;
-    end
-  endcase
+                        if (bit_idx == 3'd7) begin
+                            state <= STOP;
+                        end
+                        else begin
+                            bit_idx <= bit_idx + 1'b1;
+                        end
+                    end
+                    else begin
+                        clk_cnt <= clk_cnt + 1'b1;
+                    end
+                end
 
-end
+                // Send the stop bit for one bit period
+                STOP: begin
+                    uart_tx <= 1'b1;
 
-// Do something based on the current state
-always @(posedge clk) begin
+                    if (clk_cnt == CLKS_PER_BIT - 1) begin
+                        clk_cnt  <= 16'd0;
+                        tx_ready <= 1'b1;
+                        state    <= IDLE;
+                    end
+                    else begin
+                        clk_cnt <= clk_cnt + 1'b1;
+                    end
+                end
 
-  case (current_state)
-    idle: begin
-      // Do nothing
-    end
-    loadData: begin
-      dataReg <= dataBus;
-    end
-    wait1: begin
-      // Do nothing
-    end
-    loadShift: begin
-      shiftReg <= {1'b1, dataReg, 1'b0};
-    end
-    wait2: begin
-      // Do nothing
-    end
-    start: begin
-      serialOut <= shiftReg[0];
-      shiftReg <= shiftReg >> 1;
-      statusReg <= 4'b0001;
-    end
-    sending: begin
-      serialOut <= shiftReg[0];
-      shiftReg <= shiftReg >> 1;
-      statusReg <= statusReg + 1;
-    end
-    clear: begin
-      statusReg <= 4'b0000;
-    end
-  endcase
+                default: begin
+                    state    <= IDLE;
+                    uart_tx  <= 1'b1;
+                    tx_ready <= 1'b1;
+                    clk_cnt  <= 16'd0;
+                    bit_idx  <= 3'd0;
+                end
 
-end
+            endcase
+        end
+    end
 
 endmodule
-
