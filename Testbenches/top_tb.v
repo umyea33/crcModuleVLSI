@@ -5,11 +5,17 @@
 // ============================================================================
 module top_tb;
 
-	localparam CLK_FREQ_SIM = 1600;
-	localparam BAUD_SIM = 100;
-	localparam CLKS_PER_BIT = CLK_FREQ_SIM / BAUD_SIM;   // 16
-	localparam TIMEOUT_SIM = 20 * CLKS_PER_BIT;	// 320 clocks
-	localparam CLK_PERIOD = 10;
+	`ifdef GATE_LEVEL
+		localparam CLK_FREQ_SIM = 50_000_000;
+		localparam BAUD_SIM = 115200;
+	`else
+		localparam CLK_FREQ_SIM = 1600;
+		localparam BAUD_SIM = 100;
+	`endif
+
+		localparam CLKS_PER_BIT = CLK_FREQ_SIM / BAUD_SIM;   // 16 or 434
+		localparam TIMEOUT_SIM = 20 * CLKS_PER_BIT;
+		localparam CLK_PERIOD = 10;
 
 	reg clk = 1'b0;
 	reg rst_n = 1'b0;
@@ -20,20 +26,33 @@ module top_tb;
 	wire uart_tx;
 	wire [15:0] crc_out;
 
-	top #(
-		.CLK_FREQ(CLK_FREQ_SIM),
-		.BAUD (BAUD_SIM),
-		.TIMEOUT (TIMEOUT_SIM)
-	) dut (
-		.clk (clk),
-		.rst_n (rst_n),
-		.clear (clear),
-		.uart_rx (uart_rx),
-		.uart_tx (uart_tx),
-		.data_valid_in(data_valid_in),
-		.data_in (data_in),
-		.crc_out (crc_out)
-	);
+	`ifdef GATE_LEVEL
+		top dut (
+			.clk (clk),
+			.rst_n (rst_n),
+			.clear (clear),
+			.uart_rx (uart_rx),
+			.uart_tx (uart_tx),
+			.data_valid_in(data_valid_in),
+			.data_in (data_in),
+			.crc_out (crc_out)
+		);
+	`else
+		top #(
+			.CLK_FREQ(CLK_FREQ_SIM),
+			.BAUD (BAUD_SIM),
+			.TIMEOUT (TIMEOUT_SIM)
+		) dut (
+			.clk (clk),
+			.rst_n (rst_n),
+			.clear (clear),
+			.uart_rx (uart_rx),
+			.uart_tx (uart_tx),
+			.data_valid_in(data_valid_in),
+			.data_in (data_in),
+			.crc_out (crc_out)
+		);
+	`endif
 
 	always #(CLK_PERIOD/2) clk = ~clk;
 
